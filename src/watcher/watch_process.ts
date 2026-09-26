@@ -1,9 +1,11 @@
-import TrayManager from '../tray_manager';
-import { RazerDevice } from './razer_watcher';
+import type { RazerDevice } from '../shared_types';
 
 export abstract class WatchProcess {
-    constructor(protected trayManager: TrayManager) { }
+    /**
+     * @param devices shared device state, owned by RazerWatcher. Watchers replace entries instead of mutating them.
+     * @param notify call after the device state changed.
+     */
+    constructor(protected devices: Map<string, RazerDevice>, protected notify: () => void) { }
     abstract start(): void;
     abstract stop(): void;
-    devices: Map<string, RazerDevice> = new Map();
 }

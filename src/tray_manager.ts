@@ -1,146 +1,133 @@
-import { Menu, MenuItem, MenuItemConstructorOptions, NativeImage, Tray, nativeImage } from 'electron';
-import { RazerDevice } from './watcher/razer_watcher';
-import { assertNever } from './utils';
-import { BATTERY_CHARGING_IMAGE_PATHS, BATTERY_IMAGE_PATHS, NUMERIC_BATTERY_CHARGING_IMAGE_PATH, NUMERIC_BATTERY_IMAGE_PATH } from './resources';
+import { Menu, MenuItem, MenuItemConstructorOptions, Tray } from 'electron';
+import { IconRenderer, IconSpec } from './icon_renderer';
 import { getSettings } from './settings_manager';
-import path from 'path';
+import type { AppSettings, RazerDevice } from './shared_types';
 
-interface TrayItem {
-    tray: Tray;
-    handle: string;
-    devices: RazerDevice[];
-}
-
-type BatteryImages = { [Property in keyof typeof BATTERY_IMAGE_PATHS]: NativeImage };
-const batteryImageCache: Map<string, NativeImage> = new Map();
-const BATTERY_IMAGES = Object.fromEntries(Object.entries(BATTERY_IMAGE_PATHS).map(([k, v]) => [k, nativeImage.createFromPath(v)])) as BatteryImages;
-const BATTERY_CHARGING_IMAGES = Object.fromEntries(Object.entries(BATTERY_CHARGING_IMAGE_PATHS).map(([k, v]) => [k, nativeImage.createFromPath(v)])) as BatteryImages;
-const NUMERIC_BATTERY_IMAGES = function (percentage: number, showChargingIndicator: boolean) {
-    const basePath = showChargingIndicator ? NUMERIC_BATTERY_CHARGING_IMAGE_PATH : NUMERIC_BATTERY_IMAGE_PATH;
-    const percentageStr = Math.floor(percentage).toString().padStart(3, "0");
-    const iconPath = path.join(basePath, `battery${percentageStr}.png`);
-    let batteryIcon = batteryImageCache.get(iconPath);
-    if (!batteryIcon) {
-        batteryIcon = nativeImage.createFromPath(iconPath);
-        batteryImageCache.set(iconPath, batteryIcon);
-    }
-
-    return batteryIcon;
-};
-
-const NO_DEVICE_HANDLE = '00000000_HANDLE_NO_DEVICE';
-const SINGLE_TRAY_HANDLE = '00000001_HANDLE_SINGLE_TRAY';
-const TRAY_TITLE = "Razer Taskbar";
-
-export type TrayType = 'single' | 'multi';
+const APP_TITLE = 'Razer Taskbar';
+/** Windows truncates tray tooltips at 127 characters. */
+const MAX_TOOLTIP_LENGTH = 127;
 
 export default class TrayManager {
-    trayItems = new Map<string, TrayItem>();
-    mode: TrayType = 'single';
+    private tray: Tray | null = null;
+    private devices: RazerDevice[] = [];
+    private lightTaskbar = false;
+    private renderSequence = 0;
+    private tooltipTimer: NodeJS.Timeout | null = null;
 
-    constructor(private staticMenuItems: (MenuItemConstructorOptions | MenuItem)[]) { }
+    constructor(
+        private icons: IconRenderer,
+        private staticMenuItems: (MenuItemConstructorOptions | MenuItem)[],
+        private onClick: () => void,
+    ) { }
 
-    onDeviceUpdate(devices: Map<string, RazerDevice>) {
-        const connectedDevices = new Map([...devices.entries()].filter(([, v]) => v.isConnected));
-        // const connectedDevices = devices;
-        // const connectedDevices = new Map();
-
-        switch (this.mode) {
-            case 'single':
-                this.onDeviceUpdateSingleTray(connectedDevices);
-                break;
-            case 'multi':
-                throw new Error("Not implemented.");
-            // this.onDeviceUpdateMultiTray(connectedDevices);
-            // break;
-            default:
-                assertNever(this.mode);
-        }
+    async init(): Promise<void> {
+        const image = await this.icons.renderTrayImage(buildIconSpec(undefined, getSettings(), this.lightTaskbar));
+        this.tray = new Tray(image);
+        this.tray.setToolTip(APP_TITLE);
+        this.tray.on('click', () => this.onClick());
+        // Keep "last change N min ago" fresh.
+        this.tooltipTimer = setInterval(() => this.updateTooltip(), 30_000);
+        await this.update();
     }
 
-    onDeviceUpdateSingleTray(connectedDevices: Map<string, RazerDevice>) {
-        // Make sure that there is one and only one tray item
-        if (this.trayItems.size > 1) {
-            [...this.trayItems.keys()].slice(1).forEach(h => this.removeTrayItem(h));
-        } else if (this.trayItems.size === 0) {
-            this.trayItems.set(NO_DEVICE_HANDLE, {
-                tray: createTray(),
-                handle: NO_DEVICE_HANDLE,
-                devices: []
-            });
-        }
+    dispose(): void {
+        if (this.tooltipTimer) { clearInterval(this.tooltipTimer); }
+        this.tray?.destroy();
+        this.tray = null;
+    }
 
-        const trayItem: TrayItem = this.trayItems.values().next().value;
-        this.trayItems.delete(trayItem.handle);
-        if (connectedDevices.size === 0) {
-            trayItem.handle = NO_DEVICE_HANDLE;
-            trayItem.devices = [];
+    setDevices(devices: Map<string, RazerDevice>): void {
+        this.devices = [...devices.values()].sort((a, b) => a.name.localeCompare(b.name));
+        void this.update();
+    }
+
+    setLightTaskbar(light: boolean): void {
+        if (this.lightTaskbar === light) { return; }
+        this.lightTaskbar = light;
+        void this.update();
+    }
+
+    async update(): Promise<void> {
+        if (!this.tray) { return; }
+        const sequence = ++this.renderSequence;
+        const settings = getSettings();
+        const device = pickDeviceToDisplay(this.devices, settings);
+
+        const image = await this.icons.renderTrayImage(buildIconSpec(device, settings, this.lightTaskbar));
+        if (sequence !== this.renderSequence || !this.tray) { return; } // a newer update won the race
+        this.tray.setImage(image);
+        this.updateTooltip(device);
+        this.tray.setContextMenu(this.buildMenu());
+    }
+
+    private updateTooltip(device = pickDeviceToDisplay(this.devices, getSettings())): void {
+        if (!this.tray) { return; }
+        let text: string;
+        if (!device) {
+            text = `${APP_TITLE}\nNo device found. Is Razer Synapse running?`;
         } else {
-            trayItem.handle = SINGLE_TRAY_HANDLE;
-            trayItem.devices = [...connectedDevices.values()].sort((a, b) => a.name.localeCompare(b.name));
+            const lines = [device.name, describeState(device)];
+            if (device.lastUpdated) { lines.push(`Last change ${formatAgo(device.lastUpdated)}`); }
+            text = lines.join('\n');
         }
-        this.trayItems.set(trayItem.handle, trayItem);
-        void this.updateTrayContents();
+        this.tray.setToolTip(text.length > MAX_TOOLTIP_LENGTH ? text.slice(0, MAX_TOOLTIP_LENGTH - 1) + '…' : text);
     }
 
-    async updateTrayContents() {
-        for (const { tray, devices } of this.trayItems.values()) {
-            const deviceStatusMenuItems: (MenuItemConstructorOptions | MenuItem)[] = devices.length === 0
-                ? [{ label: 'No devices found.', type: 'normal', enabled: false }]
-                : devices.map(device => ({ label: `🔗 ${device.name} - ${device.batteryPercentage}%${device.isCharging ? ' (charging)' : ''}`, type: 'normal', enabled: false }));
+    private buildMenu(): Menu {
+        const connected = this.devices.filter(d => d.isConnected);
+        const deviceItems: MenuItemConstructorOptions[] = connected.length === 0
+            ? [{ label: 'No devices found', enabled: false }]
+            : connected.map(d => ({ label: `${d.name}  —  ${describeState(d)}`, enabled: false }));
 
-            const menu = Menu.buildFromTemplate([
-                { label: '⎯⎯⎯⎯  Razer Taskbar  ⎯⎯⎯⎯', type: 'normal', enabled: false },
-                ...deviceStatusMenuItems,
-                { type: 'separator' },
-                ...this.staticMenuItems,
-            ]);
-            tray.setContextMenu(menu);
-
-            const device = pickDeviceToDisplay(devices);
-            tray.setImage(await getTrayIcon(device));
-            if (device) {
-                tray.setToolTip(`${device.name}: ${device.batteryPercentage}% ${device.isCharging ? '(charging)' : ''}`);
-            } else {
-                tray.setToolTip(`No devices found.`);
-            }
-        }
-    }
-
-    private removeTrayItem(handle: string) {
-        this.trayItems.get(handle)?.tray.destroy();
-        this.trayItems.delete(handle);
+        return Menu.buildFromTemplate([
+            { label: APP_TITLE, enabled: false },
+            { type: 'separator' },
+            ...deviceItems,
+            { type: 'separator' },
+            ...this.staticMenuItems,
+        ]);
     }
 }
 
-/** Pick the user selected device, or with the lowest battery, preferring ones that are not charging. */
-function pickDeviceToDisplay(devices: RazerDevice[]): RazerDevice | undefined {
-    const sortChargingPercent = (a: RazerDevice, b: RazerDevice) => a.batteryPercentage * (a.isCharging ? 100 : 1) - b.batteryPercentage * (b.isCharging ? 100 : 1);
-    return devices.filter((e) => e.isSelected).sort(sortChargingPercent)[0];
-}
-
-async function getTrayIcon(device?: RazerDevice) {
+export function buildIconSpec(device: RazerDevice | undefined, settings: AppSettings, lightTaskbar: boolean): IconSpec {
+    const style = settings.showPercentage ? 'number' : 'battery';
     if (!device) {
-        return BATTERY_IMAGES.unknown;
+        return { style, percent: null, charging: false, off: false, low: false, lightTaskbar };
     }
-
-    const settings = getSettings();
-    const shouldDisplayChargingState = settings.displayChargingState;
-    const shouldDisplayNumericPercentage = settings.showPercentage;
-
-    if (shouldDisplayNumericPercentage) {
-        return NUMERIC_BATTERY_IMAGES(device.batteryPercentage, shouldDisplayNumericPercentage && device.isCharging);
-    } else {
-        const imagePercentage = Math.max(0, Math.min(4, Math.floor(device.batteryPercentage / 20))) * 25 as keyof BatteryImages;
-        return (shouldDisplayChargingState && device.isCharging) ?
-            BATTERY_CHARGING_IMAGES[imagePercentage] :
-            BATTERY_IMAGES[imagePercentage];
-    }
+    const charging = settings.displayChargingState && device.isCharging;
+    return {
+        style,
+        percent: device.batteryPercentage,
+        charging,
+        off: device.isOff,
+        low: !device.isCharging && device.batteryPercentage <= settings.lowBatteryThreshold,
+        lightTaskbar,
+    };
 }
 
-function createTray(): Tray {
-    const tray = new Tray(BATTERY_IMAGES.unknown);
-    tray.setTitle(TRAY_TITLE);
+/**
+ * The device selected in settings if connected; otherwise the connected device that most needs attention:
+ * powered on before off, not charging before charging, then lowest battery.
+ */
+export function pickDeviceToDisplay(devices: RazerDevice[], settings: AppSettings): RazerDevice | undefined {
+    const connected = devices.filter(d => d.isConnected);
+    const selected = connected.find(d => d.handle === settings.shownDeviceHandle);
+    if (selected) { return selected; }
+    const rank = (d: RazerDevice) => (d.isOff ? 1000 : 0) + (d.isCharging ? 200 : 0) + d.batteryPercentage;
+    return [...connected].sort((a, b) => rank(a) - rank(b))[0];
+}
 
-    return tray;
+export function describeState(device: RazerDevice): string {
+    if (device.isOff) { return `Off · last seen at ${device.batteryPercentage}%`; }
+    if (device.isCharging) { return device.batteryPercentage >= 100 ? 'Fully charged' : `${device.batteryPercentage}% · Charging`; }
+    return `${device.batteryPercentage}% remaining`;
+}
+
+export function formatAgo(timestamp: number, now = Date.now()): string {
+    const minutes = Math.floor(Math.max(0, now - timestamp) / 60_000);
+    if (minutes < 1) { return 'just now'; }
+    if (minutes < 60) { return `${minutes} min ago`; }
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) { return `${hours} h ${minutes % 60} min ago`; }
+    return `on ${new Date(timestamp).toLocaleString()}`;
 }

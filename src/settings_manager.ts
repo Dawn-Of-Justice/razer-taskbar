@@ -1,13 +1,16 @@
 import fsa from 'fs/promises';
-import { USER_DATA_PATH } from './resources';
 import path from 'path';
 import { ipcMain } from 'electron';
 import { EventEmitter } from 'node:events';
 import TypedEventEmitter from 'typed-emitter';
+import { USER_DATA_PATH } from './resources';
+import type { AppSettings } from './shared_types';
+
+export type { AppSettings } from './shared_types';
 
 const SETTINGS_FILE_PATH = path.join(USER_DATA_PATH, 'settings.json');
 
-let _settings: AppSettings | null = null;
+let _settings: AppSettings = createDefaultSettings();
 
 // Notify subscribers about settings changes
 class SettingsEmitter extends EventEmitter { }
@@ -19,69 +22,76 @@ export const settingsChanges = new SettingsEmitter() as TypedEventEmitter<Messag
 // Handle updates from renderer
 ipcMain.handle('getSettings', () => getSettings());
 ipcMain.handle('updateSettings', async (_, updates: Partial<AppSettings>) => {
-    return await updateSettings(updates);
+    await updateSettings(updates);
 });
-
-export interface AppSettings {
-    runAtStartup: boolean;
-    showPercentage: boolean;
-    pollingThrottleSeconds: number;
-    displayChargingState: boolean;
-    shownDeviceHandle: string;
-    synapseVersion: 'auto' | 'v3' | 'v4';
-}
 
 export function getSettings(): AppSettings {
     return { ..._settings };
 }
 
 export async function updateSettings(changes: Partial<AppSettings>) {
-    console.log(changes);
-    _settings = { ...getSettings(), ...changes };
-    Object.entries(changes).map(([k, v]) => settingsChanges.emit(k as keyof AppSettings, v));
+    const sanitized = sanitize(changes);
+    const changedKeys = (Object.keys(sanitized) as (keyof AppSettings)[]).filter(k => sanitized[k] !== _settings[k]);
+    _settings = { ..._settings, ...sanitized };
     await saveSettings();
+    changedKeys.forEach(k => settingsChanges.emit(k, _settings[k] as never));
 }
 
 export async function loadSettings() {
-    _settings = createDefaultSettings();
-
-    let settingsString = '';
+    const defaults = createDefaultSettings();
     try {
-        settingsString = await fsa.readFile(SETTINGS_FILE_PATH, { encoding: 'utf8' });
-        const loaded = JSON.parse(settingsString);
-        assertSettings(loaded);
-        await updateSettings(loaded);
+        const loaded = JSON.parse(await fsa.readFile(SETTINGS_FILE_PATH, { encoding: 'utf8' }));
+        if (!loaded || typeof loaded !== 'object') { throw new Error('Invalid settings file'); }
+        // Merge with defaults so settings added in newer versions don't wipe the user's existing choices.
+        _settings = { ...defaults, ...sanitize(loaded) };
+        await saveSettings();
     } catch (e) {
-        await updateSettings(_settings);
+        _settings = defaults;
         await saveSettings();
         settingsChanges.emit('_defaultSettingsCreated');
     }
+    // Emit everything once so subscribers can apply the initial state.
+    (Object.keys(_settings) as (keyof AppSettings)[]).forEach(k => settingsChanges.emit(k, _settings[k] as never));
 }
 
 async function saveSettings() {
-    const settingsString = JSON.stringify(_settings);
     try {
-        await fsa.writeFile(SETTINGS_FILE_PATH, settingsString);
+        await fsa.writeFile(SETTINGS_FILE_PATH, JSON.stringify(_settings, null, 2));
     } catch (e) {
         console.error(e);
     }
 }
 
-function assertSettings(settings: AppSettings) {
-    const requiredKeys = Object.keys(createDefaultSettings());
-    const keys = Object.keys(settings);
-    if (!requiredKeys.every(k => keys.includes(k))) {
-        throw new Error('Invalid settings!');
+/** Keep only known keys with the right types, clamp numbers. */
+function sanitize(input: Partial<Record<keyof AppSettings, unknown>>): Partial<AppSettings> {
+    const defaults = createDefaultSettings();
+    const result: Partial<AppSettings> = {};
+    for (const key of Object.keys(defaults) as (keyof AppSettings)[]) {
+        if (!(key in input)) { continue; }
+        const value = input[key];
+        if (typeof value !== typeof defaults[key]) { continue; }
+        (result as Record<string, unknown>)[key] = value;
     }
+    if (result.synapseVersion && !['auto', 'v3', 'v4'].includes(result.synapseVersion)) { delete result.synapseVersion; }
+    const clamp = (v: number, min: number, max: number) => Math.round(Math.max(min, Math.min(max, v)));
+    if (result.pollingThrottleSeconds !== undefined) { result.pollingThrottleSeconds = clamp(result.pollingThrottleSeconds, 1, 14400); }
+    if (result.lowBatteryThreshold !== undefined) { result.lowBatteryThreshold = clamp(result.lowBatteryThreshold, 1, 99); }
+    if (result.criticalBatteryThreshold !== undefined) { result.criticalBatteryThreshold = clamp(result.criticalBatteryThreshold, 1, 99); }
+    return result;
 }
 
 function createDefaultSettings(): AppSettings {
     return {
         runAtStartup: false,
         showPercentage: false,
-        pollingThrottleSeconds: 15,
+        pollingThrottleSeconds: 5,
         displayChargingState: true,
         shownDeviceHandle: '',
-        synapseVersion: 'auto'
+        synapseVersion: 'auto',
+        notifyLowBattery: true,
+        lowBatteryThreshold: 20,
+        notifyCriticalBattery: true,
+        criticalBatteryThreshold: 10,
+        notifyFullyCharged: true,
     };
 }

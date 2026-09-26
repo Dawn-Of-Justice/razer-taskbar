@@ -1,37 +1,29 @@
 import fs from 'fs';
-import TrayManager from '../tray_manager';
 import { getSettings, settingsChanges } from '../settings_manager';
-import path from 'path';
 import { WatcherV3 } from './watcherV3';
-import { WatcherV4, SynapseV4LogDir } from './watcherV4';
+import { WatcherV4 } from './watcherV4';
+import { getV4Candidates, SynapseV4LogDir } from './synapse4_files';
 import { WatchProcess } from './watch_process';
+import { SYNAPSE4_LOG_FILE_REGEX } from './synapse4_parser';
+import type { RazerDevice } from '../shared_types';
 
-export interface RazerDevice {
-    name: string;
-    handle: string;
-    batteryPercentage: number;
-    isCharging: boolean;
-    isConnected: boolean;
-    isSelected: boolean;
-}
+export type { RazerDevice } from '../shared_types';
 
-interface LogFileInfo {
-    fileName: string,
-    modifyTime: Date,
-    sequenceIndex: number;
-}
+export type DevicesListener = (devices: Map<string, RazerDevice>) => void;
 
+/** Owns the device state and picks/restarts the right Synapse log watcher. */
 export class RazerWatcher {
-    ongoingProcess: WatchProcess | null = null;
-    devices: Map<string, RazerDevice> = new Map();
+    private ongoingProcess: WatchProcess | null = null;
+    private dirWatcher: fs.FSWatcher | null = null;
+    private dirWatchDebounce: NodeJS.Timeout | null = null;
+    readonly devices: Map<string, RazerDevice> = new Map();
 
-    constructor(private trayManager: TrayManager) { }
+    constructor(private onDevicesChanged: DevicesListener) { }
 
     initialize(): void {
         this.watchV4LogDirForNewFiles();
-        this.trayManager.onDeviceUpdate(this.devices);
+        this.onDevicesChanged(this.devices);
         settingsChanges.on('pollingThrottleSeconds', () => this.stopAndStart());
-        settingsChanges.on('shownDeviceHandle', () => this.stopAndStart());
         settingsChanges.on('synapseVersion', () => this.stopAndStart());
     }
 
@@ -40,66 +32,56 @@ export class RazerWatcher {
         this.ongoingProcess = this.pickAndStartWatcherProcess();
     }
 
+    dispose(): void {
+        this.ongoingProcess?.stop();
+        this.ongoingProcess = null;
+        this.dirWatcher?.close();
+        this.dirWatcher = null;
+    }
+
     listDevices(): RazerDevice[] {
         return [...this.devices.values()];
     }
 
     private pickAndStartWatcherProcess(): WatchProcess | null {
-        let wp = null;
+        const notify = () => this.onDevicesChanged(this.devices);
+        let wp: WatchProcess | null = null;
         switch (getSettings().synapseVersion) {
-            case 'v3': wp = new WatcherV3(this.trayManager); break;
-            case 'v4': wp = new WatcherV4(this.trayManager); break;
+            case 'v3': wp = new WatcherV3(this.devices, notify); break;
+            case 'v4': wp = new WatcherV4(this.devices, notify); break;
             case 'auto':
-                if (this.getV4Candidates().length > 0) {
-                    wp = new WatcherV4(this.trayManager);
-                } else {
-                    wp = new WatcherV3(this.trayManager);
-                }
+            default:
+                wp = getV4Candidates().length > 0
+                    ? new WatcherV4(this.devices, notify)
+                    : new WatcherV3(this.devices, notify);
                 break;
         }
-        if (wp) {
-            wp.devices = this.devices;
-            wp.start();
-        }
+        wp.start();
         return wp;
     }
 
     /**
-     * Try watching the V4 log directory for new files. If there is a new file, restart the watcher with it.
-     * If there is no V4 directory, this fails a single time and won't try again.
+     * Synapse 4 rotates its log (systray_systrayv2.log -> systray_systrayv23.log -> ...).
+     * Restart the watcher whenever the newest log file changes.
      */
     private watchV4LogDirForNewFiles() {
-        let v4Candidates = this.getV4Candidates();
+        let newest = getV4Candidates()[0]?.fileName;
         try {
-            fs.watch(SynapseV4LogDir, () => {
-                const newV4Candidates = this.getV4Candidates();
-                if (v4Candidates.length !== newV4Candidates.length || v4Candidates.some((x, i) => x.fileName !== newV4Candidates[i].fileName)) {
-                    v4Candidates = newV4Candidates;
-                    if (v4Candidates.length > 0) {
-                        console.log('Synapse V4 candidates:\n' + v4Candidates.map(x => `- ${x.fileName} (${x.sequenceIndex}) ${x.modifyTime}`).join('\n'));
+            this.dirWatcher = fs.watch(SynapseV4LogDir, (_event, fileName) => {
+                if (fileName && !SYNAPSE4_LOG_FILE_REGEX.test(fileName.toString())) { return; }
+                // Debounce: rotation produces a burst of rename/change events.
+                if (this.dirWatchDebounce) { clearTimeout(this.dirWatchDebounce); }
+                this.dirWatchDebounce = setTimeout(() => {
+                    const current = getV4Candidates()[0]?.fileName;
+                    if (current !== newest) {
+                        console.log(`Synapse 4 log rotated: ${newest} -> ${current}`);
+                        newest = current;
+                        this.stopAndStart();
                     }
-                    this.stopAndStart();
-                }
+                }, 1000);
             });
         } catch (e) {
             console.warn(`Could not set up watcher on V4 log dir: ${SynapseV4LogDir}`);
         }
-    }
-
-    private getV4Candidates(): LogFileInfo[] {
-        try {
-            if (!fs.existsSync(SynapseV4LogDir)) { return []; }
-
-            const fileNameRegex = /^systray_systrayv\d(?<index>\d*).log$/;
-            const candidates: LogFileInfo[] = fs.readdirSync(SynapseV4LogDir).filter(x => fileNameRegex.test(x)).map(x => ({
-                fileName: x,
-                modifyTime: fs.statSync(path.resolve(SynapseV4LogDir, x)).mtime,
-                sequenceIndex: parseInt(fileNameRegex.exec(x).groups["index"] || "-1")
-            }));
-
-            candidates.sort((a, b) => b.sequenceIndex - a.sequenceIndex);
-            return candidates;
-        } catch (e) { console.log(`Error finding Synapse 4 log files: ${e}`); }
-        return [];
     }
 }

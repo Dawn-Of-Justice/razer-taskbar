@@ -7,9 +7,15 @@ Inspired by [Tekk-Know/RazerBatteryTaskbar](https://github.com/Tekk-Know/RazerBa
   
 ![Screenshot of razer-taskbar battery icon and its menu showing its connected to a Razer headset.](docs/screenshot.png)  
 
-| ≥80% | ≥60% | ≥40% | ≥20% | ≥0% | unknown % | numeric |
-|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-|![100%](src/assets/battery100_@2x.png) ![100% charging](src/assets/battery100_chrg_@2x.png)|![75%](src/assets/battery75_@2x.png) ![75% charging](src/assets/battery75_chrg_@2x.png)|![50%](src/assets/battery50_@2x.png) ![50% charging](src/assets/battery50_chrg_@2x.png)|![25%](src/assets/battery25_@2x.png) ![25% charging](src/assets/battery25_chrg_@2x.png)|![0%](src/assets/battery0_@2x.png) ![0% charging](src/assets/battery0_chrg_@2x.png)|![battery unknown](src/assets/battery_unknown_@2x.png)|![100%](src/assets/numeric-icon/battery078.png) ![100%](src/assets/numeric-icon-chrg/battery078.png)|
+### Features
+
+* **Windows 11 style tray icon**, drawn at runtime for every DPI (100%–200%) and matched to your taskbar's light/dark mode.
+  Choose between a battery glyph or the exact percentage with a level bar. Low battery turns red.
+* **Charging and powered-off states.** A headset that is switched off while its dongle stays plugged in shows a crossed-out battery instead of a stale percentage.
+* **Notifications** for low battery, critical battery and fully charged (thresholds configurable, each fires once per crossing).
+* **Tooltip** with device name, state and when Synapse last reported a change.
+* **Modern settings window** (Mica on Windows 11, Razer green accent, follows system light/dark mode) with a live battery card.
+* Left-click the tray icon to open settings; launching the app again focuses the running instance.
 
 ## Requirements
 
@@ -24,7 +30,7 @@ Run the setup exe. After installation the app will show its icon on the taskbar.
 ## Supported Hardware
 
 * Potentially any wireless Razer device compatible with Razer Synapse 3 or 4.
-* tested with Razer Blackshark V2 Pro (2023)
+* tested with Razer Blackshark V2 Pro (2023) and Razer Barracuda X Chroma (HyperSpeed dongle)
 
 ## Compiling
 
@@ -34,13 +40,24 @@ Run the setup exe. After installation the app will show its icon on the taskbar.
 
 ## How it works
 
-The app is monitoring the logs of Razer Synapse. The monitored file is:
+The app monitors the logs of Razer Synapse:
 
 * `%LOCALAPPDATA%\Razer\Synapse3\Log\Razer Synapse 3.log` for Razer Synapse 3
-* `%LOCALAPPDATA%\Razer\RazerAppEngine\User Data\Logs\systray_systrayv2.log` for Razer Synapse 4
+* `%LOCALAPPDATA%\Razer\RazerAppEngine\User Data\Logs\systray_systrayv2*.log` for Razer Synapse 4
 
-The app reads the log content throttled by the "Maximum battery update delay" setting. The code is looking for connection and battery information in the logs, and parses the latest state of each device as defined in [`razer_watcher.ts`](https://github.com/sanraith/razer-taskbar/blob/main/src/watcher/razer_watcher.ts).
-If the log format of Razer Synapse changes, this file will need to be updated.
+Synapse 4 writes a `connectingDeviceData: [...]` line whenever a device connects or its battery changes, and rotates the log
+at about 5 MB (`systray_systrayv2.log`, `systray_systrayv23.log`, ...). The watcher follows the newest file, reads only the bytes
+appended since the last check, and falls back to older rotated files when the newest one has no battery line yet.
+Parsing lives in [`synapse4_parser.ts`](src/watcher/synapse4_parser.ts); if Synapse changes its log format, that is the file to update.
+
+Synapse 4 power states seen in the logs:
+
+| `chargingStatus` | `level` | Meaning |
+|---|---|---|
+| `NoCharge_BatteryFull` | 0–100 | On battery (despite the name) |
+| `Charging` | 0–100 | Charging |
+| `off` | last level | Device powered off, receiver still plugged in |
+| any | `-1` | Unknown (briefly, while turning on / reconnecting); the last known level is kept |
 
 ## Attributions
 
