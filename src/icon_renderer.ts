@@ -86,7 +86,8 @@ function normalize(spec: IconSpec): IconSpec {
 
 /**
  * Runs inside the hidden renderer. Must be fully self-contained (no references to outer scope).
- * Geometry is computed in whole pixels per size so strokes stay crisp at 100% scaling.
+ * Battery style uses the exact glyphs Windows draws for its own battery icon; the hand-drawn battery below
+ * is only a fallback for systems without the Segoe icon fonts.
  */
 function drawIcons(spec: IconSpec, sizes: number[]): string[] {
     const fg = spec.lightTaskbar ? '#1b1b1b' : '#ffffff';
@@ -194,66 +195,101 @@ function drawIcons(spec: IconSpec, sizes: number[]): string[] {
         }
     }
 
-    function drawNumber(ctx: CanvasRenderingContext2D, S: number) {
-        const barH = Math.max(2, Math.round(S / 8));
-        const textAreaH = S - barH - Math.max(1, Math.round(S / 16));
-        const dim = spec.percent === null || spec.off;
-        const text = spec.off ? 'off' : spec.percent === null ? '?' : String(spec.percent);
+    // ---------- Windows' own battery glyphs (Segoe Fluent Icons on Win 11, Segoe MDL2 Assets on Win 10) ----------
+    const GLYPH_FONT = '"Segoe Fluent Icons", "Segoe MDL2 Assets"';
+    const BATTERY = ['\uE850', '\uE851', '\uE852', '\uE853', '\uE854', '\uE855', '\uE856', '\uE857', '\uE858', '\uE859', '\uE83F'];
+    const BATTERY_CHARGING = ['\uE85A', '\uE85B', '\uE85C', '\uE85D', '\uE85E', '\uE85F', '\uE860', '\uE861', '\uE862', '\uE83E', '\uEA93'];
+    const BATTERY_UNKNOWN = '\uE996';
 
-        // Fit the text into the square: as tall as possible, condensed horizontally if needed ("100").
-        let fontSize = Math.round(textAreaH * 1.3);
-        ctx.font = `600 ${fontSize}px ${font}`;
-        let m = ctx.measureText(text);
-        let glyphH = m.actualBoundingBoxAscent + m.actualBoundingBoxDescent;
-        if (glyphH > textAreaH) {
-            fontSize = Math.floor(fontSize * textAreaH / glyphH);
-            ctx.font = `600 ${fontSize}px ${font}`;
-            m = ctx.measureText(text);
-            glyphH = m.actualBoundingBoxAscent + m.actualBoundingBoxDescent;
-        }
-        const glyphW = m.actualBoundingBoxLeft + m.actualBoundingBoxRight;
-        const scaleX = Math.min(1, (S + 0.5) / glyphW);
+    function hasGlyphFont(ctx: CanvasRenderingContext2D): boolean {
+        ctx.font = `32px ${GLYPH_FONT}, "__rt_missing_font__"`;
+        const withFont = ctx.measureText(BATTERY[10]).width;
+        ctx.font = '32px "__rt_missing_font__"';
+        const without = ctx.measureText(BATTERY[10]).width;
+        return withFont !== without;
+    }
 
-        ctx.save();
-        ctx.globalAlpha = dim ? 0.55 : 1;
-        ctx.fillStyle = spec.low ? red : fg;
-        ctx.translate(S / 2, 0);
-        ctx.scale(scaleX, 1);
-        const x = -glyphW / 2 + m.actualBoundingBoxLeft;
-        const y = Math.round((textAreaH - glyphH) / 2 + m.actualBoundingBoxAscent);
+    /** Draw text centred on its ink box, snapped to whole pixels so it stays crisp like the shell's icons. */
+    function drawCentered(ctx: CanvasRenderingContext2D, text: string, S: number, fontCss: string) {
+        ctx.font = fontCss;
+        const m = ctx.measureText(text);
+        const inkW = m.actualBoundingBoxLeft + m.actualBoundingBoxRight;
+        const inkH = m.actualBoundingBoxAscent + m.actualBoundingBoxDescent;
+        const x = Math.round((S - inkW) / 2 + m.actualBoundingBoxLeft);
+        const y = Math.round((S - inkH) / 2 + m.actualBoundingBoxAscent);
         ctx.fillText(text, x, y);
-        ctx.restore();
+    }
 
-        // Level bar
-        const barY = S - barH;
-        const inset = Math.max(1, Math.round(S / 16));
-        const barW = S - inset * 2;
-        ctx.globalAlpha = 0.35;
+    function glyphFor(): string {
+        if (spec.percent === null) { return BATTERY_UNKNOWN; }
+        // Same 10% steps the Windows battery flyout uses; any charge above 0 shows at least one bar.
+        const step = spec.percent <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(spec.percent / 10)));
+        return (spec.charging ? BATTERY_CHARGING : BATTERY)[step];
+    }
+
+    function drawGlyph(ctx: CanvasRenderingContext2D, S: number) {
         ctx.fillStyle = fg;
-        roundRect(ctx, inset, barY, barW, barH, barH / 2);
-        ctx.fill();
+        ctx.globalAlpha = spec.off ? 0.4 : spec.percent === null ? 0.7 : 1;
+        // The shell draws these glyphs at 16px per 100% scale, i.e. font size == icon size.
+        drawCentered(ctx, glyphFor(), S, `${S}px ${GLYPH_FONT}`);
         ctx.globalAlpha = 1;
-        if (!dim) {
-            const pct = spec.percent as number;
-            const w = pct <= 0 ? 0 : Math.max(barH, Math.round(barW * pct / 100));
-            if (w > 0) {
-                ctx.fillStyle = spec.charging ? green : spec.low ? red : fg;
-                roundRect(ctx, inset, barY, w, barH, barH / 2);
-                ctx.fill();
-            }
+    }
+
+    /**
+     * Percentage style: just the number, as big and crisp as the square allows, in the Windows UI font.
+     * Colour carries the state (green = charging, red = low, dimmed = headset off).
+     * 100% has no room for three digits at 16 px, so it shows the full battery glyph instead.
+     */
+    function drawNumber(ctx: CanvasRenderingContext2D, S: number, glyphs: boolean) {
+        if (spec.percent === null || spec.percent >= 100) {
+            if (glyphs) { drawGlyph(ctx, S); } else { drawBattery(ctx, S); }
+            return;
         }
+        const text = String(spec.percent);
+        ctx.fillStyle = spec.charging ? green : spec.low ? red : fg;
+        ctx.globalAlpha = spec.off ? 0.4 : 1;
+
+        // Aim for digits ~75% of the icon height; allow up to 15% horizontal condensing so two digits
+        // stay tall at 16 px, and shrink only if they still would not fit.
+        const maxH = S * 0.75;
+        const minScaleX = 0.85;
+        let size = S;
+        let m: TextMetrics;
+        let inkW = 0;
+        let inkH = 0;
+        for (; size > 6; size -= 0.5) {
+            ctx.font = `600 ${size}px ${font}`;
+            m = ctx.measureText(text);
+            inkW = m.actualBoundingBoxLeft + m.actualBoundingBoxRight;
+            inkH = m.actualBoundingBoxAscent + m.actualBoundingBoxDescent;
+            if (inkH <= maxH && inkW * minScaleX <= S) { break; }
+        }
+        const scaleX = Math.min(1, S / inkW);
+        const x = (S - inkW * scaleX) / 2 + m.actualBoundingBoxLeft * scaleX;
+        const y = Math.round((S - inkH) / 2 + m.actualBoundingBoxAscent);
+        ctx.save();
+        ctx.translate(Math.round(x * 2) / 2, y);
+        ctx.scale(scaleX, 1);
+        ctx.fillText(text, 0, 0);
+        ctx.restore();
+        ctx.globalAlpha = 1;
     }
 
     const canvas = document.createElement('canvas');
+    const glyphs = hasGlyphFont(canvas.getContext('2d'));
     return sizes.map(S => {
         canvas.width = S;
         canvas.height = S;
         const ctx = canvas.getContext('2d');
         ctx.clearRect(0, 0, S, S);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
         if (spec.style === 'number') {
-            drawNumber(ctx, S);
+            drawNumber(ctx, S, glyphs);
+        } else if (glyphs) {
+            drawGlyph(ctx, S);
         } else {
-            drawBattery(ctx, S);
+            drawBattery(ctx, S); // fallback when the Windows icon font is unavailable
         }
         return canvas.toDataURL('image/png');
     });
