@@ -148,14 +148,23 @@ export class WatcherV4 extends WatchProcess {
                 if (!d.isOff) { continue; } // nothing useful to show yet
             }
             reported.add(handle);
-            this.devices.set(handle, {
+            const next = {
                 handle,
                 name: d.name,
                 batteryPercentage: batteryPercentage ?? 0,
                 isCharging: d.isCharging,
                 isOff: d.isOff,
                 isConnected: true,
-                lastUpdated: d.batteryPercentage === null && previous ? previous.lastUpdated : event.timestamp,
+            };
+            // Synapse re-logs the same state whenever its window opens or a device re-enumerates.
+            // Only move "last change" when something actually changed.
+            const unchanged = previous && previous.isConnected
+                && previous.batteryPercentage === next.batteryPercentage
+                && previous.isCharging === next.isCharging
+                && previous.isOff === next.isOff;
+            this.devices.set(handle, {
+                ...next,
+                lastUpdated: (unchanged || d.batteryPercentage === null) && previous ? previous.lastUpdated : event.timestamp,
             });
         }
         for (const [handle, device] of this.devices) {
