@@ -2,7 +2,7 @@
 // https://www.electronjs.org/docs/latest/tutorial/process-model#preload-scripts
 
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
-import type { AppSettings, IconPreviewRequest, RazerDevice, TrayAppApi } from './shared_types';
+import type { AppSettings, IconPreviewRequest, RazerDevice, TrayAppApi } from './shared/types';
 
 const api: TrayAppApi = {
     getSettings: () => ipcRenderer.invoke('getSettings'),
