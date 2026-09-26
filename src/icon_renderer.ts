@@ -86,8 +86,7 @@ function normalize(spec: IconSpec): IconSpec {
 
 /**
  * Runs inside the hidden renderer. Must be fully self-contained (no references to outer scope).
- * Battery style uses the exact glyphs Windows draws for its own battery icon; the hand-drawn battery below
- * is only a fallback for systems without the Segoe icon fonts.
+ * All shapes are drawn on whole pixels (no anti-aliasing) so they match the crisp shell icons in the tray.
  */
 function drawIcons(spec: IconSpec, sizes: number[]): string[] {
     const fg = spec.lightTaskbar ? '#1b1b1b' : '#ffffff';
@@ -95,154 +94,103 @@ function drawIcons(spec: IconSpec, sizes: number[]): string[] {
     const green = spec.lightTaskbar ? '#0f7b0f' : '#6ccb5f';
     const font = '"Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif';
 
-    function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
-        const rr = Math.max(0, Math.min(r, w / 2, h / 2));
-        ctx.beginPath();
-        ctx.moveTo(x + rr, y);
-        ctx.arcTo(x + w, y, x + w, y + h, rr);
-        ctx.arcTo(x + w, y + h, x, y + h, rr);
-        ctx.arcTo(x, y + h, x, y, rr);
-        ctx.arcTo(x, y, x + w, y, rr);
-        ctx.closePath();
-    }
-
-    function boltPath(ctx: CanvasRenderingContext2D, cx: number, cy: number, h: number) {
-        const w = h * 0.62;
-        const pts = [[0.60, 0], [0.08, 0.57], [0.45, 0.57], [0.36, 1], [0.92, 0.40], [0.55, 0.40], [0.66, 0]];
-        ctx.beginPath();
-        pts.forEach(([px, py], i) => {
-            const x = cx - w / 2 + px * w;
-            const y = cy - h / 2 + py * h;
-            if (i === 0) { ctx.moveTo(x, y); } else { ctx.lineTo(x, y); }
-        });
-        ctx.closePath();
-    }
-
-    function drawBolt(ctx: CanvasRenderingContext2D, cx: number, cy: number, h: number, knockout: number, color: string) {
-        ctx.save();
-        boltPath(ctx, cx, cy, h);
-        ctx.globalCompositeOperation = 'destination-out';
-        ctx.lineWidth = knockout * 2;
-        ctx.lineJoin = 'round';
-        ctx.stroke();
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.fillStyle = color;
-        ctx.fill();
-        ctx.restore();
-    }
-
+    /**
+     * Pixel-exact battery in the style of the Windows tray icons next to it (network, volume):
+     * 1 px strokes up to 150% scaling (2 px from 175%), square pixels, softened corners, no anti-aliasing.
+     * Everything is drawn with whole-pixel fillRect calls so it is as sharp as the shell's own icons.
+     */
     function drawBattery(ctx: CanvasRenderingContext2D, S: number) {
-        const lw = Math.max(1, Math.round(S / 16));
-        const bodyW = Math.round(S * 14 / 16);
-        const bodyH = Math.round(S * 8 / 16 / 2) * 2;
-        const nubW = Math.max(2, Math.round(S * 1.5 / 16));
-        const nubH = Math.max(2, Math.round(bodyH * 0.45 / 2) * 2);
-        const left = Math.floor((S - bodyW - nubW) / 2);
-        const top = Math.round((S - bodyH) / 2);
-        const radius = S * 2.25 / 16;
+        const lw = S >= 28 ? 2 : 1;
+        const bodyW = Math.round(S * 0.8);          // 16->13, 20->16, 24->19, 28->22, 32->26
+        const bodyH = Math.round(S / 2 / 2) * 2;    // 16->8, 20->10, 24->12, 28->14, 32->16
+        const tipW = Math.max(2, Math.round(S / 10));
+        const tipH = Math.max(2, Math.round(bodyH * 0.45 / 2) * 2);
+        const left = Math.floor((S - bodyW - tipW) / 2);
+        const top = Math.floor((S - bodyH) / 2);
         const dim = spec.percent === null || spec.off;
+        const px = (x: number, y: number, w: number, h: number) => ctx.fillRect(x, y, w, h);
 
-        const gap = lw;
-        const innerX = left + lw;
-        const innerY = top + lw;
-        const innerW = bodyW - 2 * lw;
-        const innerH = bodyH - 2 * lw;
+        ctx.fillStyle = fg;
+        ctx.globalAlpha = spec.off ? 0.4 : spec.percent === null ? 0.6 : 1;
+        // Outline with the corner pixel left out, which reads as a small radius at tray sizes.
+        const c = lw; // corner inset
+        px(left + c, top, bodyW - 2 * c, lw);                      // top
+        px(left + c, top + bodyH - lw, bodyW - 2 * c, lw);         // bottom
+        px(left, top + c, lw, bodyH - 2 * c);                      // left
+        px(left + bodyW - lw, top + c, lw, bodyH - 2 * c);         // right
+        if (lw === 2) { // fill the inner corner pixel so 2 px strokes stay continuous
+            px(left + 1, top + 1, 1, 1); px(left + bodyW - 2, top + 1, 1, 1);
+            px(left + 1, top + bodyH - 2, 1, 1); px(left + bodyW - 2, top + bodyH - 2, 1, 1);
+        }
+        // Terminal
+        px(left + bodyW, top + (bodyH - tipH) / 2, tipW - 1, tipH);
+        px(left + bodyW + tipW - 1, top + (bodyH - tipH) / 2 + 1, 1, tipH - 2);
 
-        // Level fill
-        if (!dim) {
-            const fullW = innerW - 2 * gap;
+        // Level fill, 1 px gap inside the outline
+        const gap = 1;
+        const fx = left + lw + gap;
+        const fy = top + lw + gap;
+        const fullW = bodyW - 2 * (lw + gap);
+        const fh = bodyH - 2 * (lw + gap);
+        // While charging the bolt replaces the fill (a partly cut-out fill turns into noise at 16 px);
+        // the exact level is in the tooltip.
+        if (!dim && !spec.charging) {
             const pct = spec.percent as number;
-            const fw = pct <= 0 ? 0 : Math.max(Math.max(1, lw), Math.round(fullW * pct / 100));
-            if (fw > 0) {
-                ctx.fillStyle = spec.low ? red : fg;
-                roundRect(ctx, innerX + gap, innerY + gap, fw, innerH - 2 * gap, Math.max(0.5, radius - lw - gap));
-                ctx.fill();
-            }
+            const fw = pct <= 0 ? 0 : Math.max(1, Math.round(fullW * pct / 100));
+            if (fw > 0) { px(fx, fy, fw, fh); }
         }
-
-        // Charging bolt sits inside the body; it is cut out of the fill so it stays readable at any level.
-        if (spec.charging) {
-            const boltH = innerH + lw;
-            drawBolt(ctx, innerX + innerW / 2, top + bodyH / 2, boltH, lw * 0.75, fg);
-        }
-
-        // Outline + terminal drawn last so nothing cuts into them.
-        ctx.globalAlpha = dim ? 0.5 : 1;
-        ctx.strokeStyle = fg;
-        ctx.lineWidth = lw;
-        roundRect(ctx, left + lw / 2, top + lw / 2, bodyW - lw, bodyH - lw, radius);
-        ctx.stroke();
-        ctx.fillStyle = fg;
-        roundRect(ctx, left + bodyW, top + (bodyH - nubH) / 2, nubW, nubH, nubW / 2);
-        ctx.fill();
-        ctx.fillRect(left + bodyW, top + (bodyH - nubH) / 2, Math.ceil(nubW / 2), nubH);
         ctx.globalAlpha = 1;
 
-        if (spec.off) {
-            // Diagonal slash, knocked out from the glyph for legibility.
-            ctx.save();
-            ctx.lineCap = 'round';
-            const a = [S * 0.18, S * 0.85];
-            const b = [S * 0.78, S * 0.15];
-            ctx.globalCompositeOperation = 'destination-out';
-            ctx.lineWidth = lw * 3;
-            ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
-            ctx.globalCompositeOperation = 'source-over';
-            ctx.strokeStyle = fg;
-            ctx.lineWidth = lw * 1.25;
-            ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
-            ctx.restore();
-        }
-    }
-
-    // ---------- Windows' own battery glyphs (Segoe Fluent Icons on Win 11, Segoe MDL2 Assets on Win 10) ----------
-    const GLYPH_FONT = '"Segoe Fluent Icons", "Segoe MDL2 Assets"';
-    const BATTERY = ['\uE850', '\uE851', '\uE852', '\uE853', '\uE854', '\uE855', '\uE856', '\uE857', '\uE858', '\uE859', '\uE83F'];
-    const BATTERY_CHARGING = ['\uE85A', '\uE85B', '\uE85C', '\uE85D', '\uE85E', '\uE85F', '\uE860', '\uE861', '\uE862', '\uE83E', '\uEA93'];
-    const BATTERY_UNKNOWN = '\uE996';
-
-    function hasGlyphFont(ctx: CanvasRenderingContext2D): boolean {
-        ctx.font = `32px ${GLYPH_FONT}, "__rt_missing_font__"`;
-        const withFont = ctx.measureText(BATTERY[10]).width;
-        ctx.font = '32px "__rt_missing_font__"';
-        const without = ctx.measureText(BATTERY[10]).width;
-        return withFont !== without;
-    }
-
-    /** Draw text centred on its ink box, snapped to whole pixels so it stays crisp like the shell's icons. */
-    function drawCentered(ctx: CanvasRenderingContext2D, text: string, S: number, fontCss: string) {
-        ctx.font = fontCss;
-        const m = ctx.measureText(text);
-        const inkW = m.actualBoundingBoxLeft + m.actualBoundingBoxRight;
-        const inkH = m.actualBoundingBoxAscent + m.actualBoundingBoxDescent;
-        const x = Math.round((S - inkW) / 2 + m.actualBoundingBoxLeft);
-        const y = Math.round((S - inkH) / 2 + m.actualBoundingBoxAscent);
-        ctx.fillText(text, x, y);
-    }
-
-    function glyphFor(): string {
-        if (spec.percent === null) { return BATTERY_UNKNOWN; }
-        // Same 10% steps the Windows battery flyout uses; any charge above 0 shows at least one bar.
-        const step = spec.percent <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(spec.percent / 10)));
-        return (spec.charging ? BATTERY_CHARGING : BATTERY)[step];
-    }
-
-    function drawGlyph(ctx: CanvasRenderingContext2D, S: number) {
-        ctx.fillStyle = fg;
-        ctx.globalAlpha = spec.off ? 0.4 : spec.percent === null ? 0.7 : 1;
-        // The shell draws these glyphs at 16px per 100% scale, i.e. font size == icon size.
-        drawCentered(ctx, glyphFor(), S, `${S}px ${GLYPH_FONT}`);
-        ctx.globalAlpha = 1;
+        if (spec.charging) { drawPixelBolt(ctx, S, left + Math.floor(bodyW / 2), top, bodyH); }
     }
 
     /**
-     * Percentage style: just the number, as big and crisp as the square allows, in the Windows UI font.
-     * Colour carries the state (green = charging, red = low, dimmed = headset off).
-     * 100% has no room for three digits at 16 px, so it shows the full battery glyph instead.
+     * Lightning bolt overlaid on the battery centre, rasterised without anti-aliasing and cut out of the
+     * battery by 1 px so it stays readable on top of the fill and outline.
      */
-    function drawNumber(ctx: CanvasRenderingContext2D, S: number, glyphs: boolean) {
+    function drawPixelBolt(ctx: CanvasRenderingContext2D, S: number, cx: number, top: number, bodyH: number) {
+        const h = bodyH + (S >= 24 ? 4 : 2);
+        const w = Math.max(5, Math.round(h * 0.6) | 1);
+        const y0 = top + Math.floor((bodyH - h) / 2);
+        const x0 = cx - Math.floor(w / 2);
+        const pts = [[0.62, 0], [0.0, 0.58], [0.46, 0.58], [0.34, 1], [1.0, 0.40], [0.54, 0.40], [0.70, 0]];
+
+        // Rasterise the bolt into a mask (threshold instead of anti-aliasing).
+        const off = document.createElement('canvas');
+        off.width = S; off.height = S;
+        const o = off.getContext('2d');
+        o.beginPath();
+        pts.forEach(([u, v], i) => {
+            const x = x0 + u * w; const y = y0 + v * h;
+            if (i === 0) { o.moveTo(x, y); } else { o.lineTo(x, y); }
+        });
+        o.closePath();
+        o.fillStyle = '#000';
+        o.fill();
+        const src = o.getImageData(0, 0, S, S).data;
+        const mask: boolean[] = [];
+        for (let i = 0; i < S * S; i++) { mask.push(src[i * 4 + 3] >= 110); }
+
+        const img = ctx.getImageData(0, 0, S, S);
+        const d = img.data;
+        const [r, g, b] = fg === '#ffffff' ? [255, 255, 255] : [27, 27, 27];
+        const inMask = (x: number, y: number) => x >= 0 && y >= 0 && x < S && y < S && mask[y * S + x];
+        for (let y = 0; y < S; y++) {
+            for (let x = 0; x < S; x++) {
+                const i = (y * S + x) * 4;
+                if (inMask(x, y)) {
+                    d[i] = r; d[i + 1] = g; d[i + 2] = b; d[i + 3] = 255;
+                } else if (inMask(x - 1, y) || inMask(x + 1, y) || inMask(x, y - 1) || inMask(x, y + 1)) {
+                    d[i + 3] = 0; // 1 px knockout around the bolt
+                }
+            }
+        }
+        ctx.putImageData(img, 0, 0);
+    }
+
+    function drawNumber(ctx: CanvasRenderingContext2D, S: number) {
         if (spec.percent === null || spec.percent >= 100) {
-            if (glyphs) { drawGlyph(ctx, S); } else { drawBattery(ctx, S); }
+            drawBattery(ctx, S);
             return;
         }
         const text = String(spec.percent);
@@ -276,7 +224,7 @@ function drawIcons(spec: IconSpec, sizes: number[]): string[] {
     }
 
     const canvas = document.createElement('canvas');
-    const glyphs = hasGlyphFont(canvas.getContext('2d'));
+    canvas.getContext('2d', { willReadFrequently: true });
     return sizes.map(S => {
         canvas.width = S;
         canvas.height = S;
@@ -285,11 +233,9 @@ function drawIcons(spec: IconSpec, sizes: number[]): string[] {
         ctx.textAlign = 'left';
         ctx.textBaseline = 'alphabetic';
         if (spec.style === 'number') {
-            drawNumber(ctx, S, glyphs);
-        } else if (glyphs) {
-            drawGlyph(ctx, S);
+            drawNumber(ctx, S);
         } else {
-            drawBattery(ctx, S); // fallback when the Windows icon font is unavailable
+            drawBattery(ctx, S);
         }
         return canvas.toDataURL('image/png');
     });
