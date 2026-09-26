@@ -19,12 +19,10 @@ const GITHUB_URL = 'https://github.com/sanraith/razer-taskbar';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-if (require('electron-squirrel-startup')) {
-  app.quit();
-}
-
+const isSquirrelEvent: boolean = require('electron-squirrel-startup');
 // Only one tray icon: a second launch just opens the settings of the running instance.
-if (!app.requestSingleInstanceLock()) {
+const shouldExit = isSquirrelEvent || !app.requestSingleInstanceLock();
+if (shouldExit) {
   app.quit();
 }
 
@@ -130,6 +128,7 @@ app.on('second-instance', () => openSettingsWindow());
 app.on('window-all-closed', () => { /* do not quit */ });
 
 app.on('ready', async () => {
+  if (shouldExit) { return; }
   registerIpc();
 
   let isFirstTimeLaunch = false;
