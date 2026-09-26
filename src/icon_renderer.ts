@@ -1,4 +1,8 @@
-import { BrowserWindow, NativeImage, nativeImage } from 'electron';
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { app, BrowserWindow, NativeImage, nativeImage } from 'electron';
+import { buildIco } from './ico';
 import type { IconStyle } from './shared_types';
 
 export interface IconSpec {
@@ -14,6 +18,8 @@ export interface IconSpec {
 
 /** Tray icon sizes per display scale factor (100% .. 200%). */
 const TRAY_SIZES: [scaleFactor: number, size: number][] = [[1, 16], [1.25, 20], [1.5, 24], [1.75, 28], [2, 32]];
+/** Sizes written into the Windows .ico: every tray size from 100% to 300% scaling. */
+const ICO_SIZES = [16, 20, 24, 28, 32, 36, 40, 48];
 
 /**
  * Renders Windows 11 style tray icons at runtime with a hidden, sandboxed window's <canvas>.
@@ -23,7 +29,8 @@ const TRAY_SIZES: [scaleFactor: number, size: number][] = [[1, 16], [1.25, 20], 
 export class IconRenderer {
     private window: BrowserWindow | null = null;
     private ready: Promise<void> | null = null;
-    private readonly cache = new Map<string, NativeImage>();
+    private readonly cache = new Map<string, NativeImage | string>();
+    private readonly icoDir = path.join(app.getPath('userData'), 'tray-icons');
 
     init(): Promise<void> {
         if (!this.ready) {
@@ -45,19 +52,46 @@ export class IconRenderer {
         this.ready = null;
     }
 
-    /** Multi-resolution tray image. */
-    async renderTrayImage(spec: IconSpec): Promise<NativeImage> {
+    /**
+     * Tray image for the current platform. On Windows this is the path of a multi-size .ico file, so the shell
+     * picks the exact pixel size for the display scaling (a NativeImage would be stretched from 16 px and blur).
+     */
+    async renderTrayImage(spec: IconSpec): Promise<NativeImage | string> {
         const key = JSON.stringify(normalize(spec));
         const cached = this.cache.get(key);
         if (cached) { return cached; }
 
-        const urls = await this.drawDataUrls(spec, TRAY_SIZES.map(([, size]) => size));
-        const image = nativeImage.createEmpty();
-        TRAY_SIZES.forEach(([scaleFactor], i) => image.addRepresentation({ scaleFactor, dataURL: urls[i] }));
+        let result: NativeImage | string;
+        if (process.platform === 'win32') {
+            result = await this.renderIcoFile(spec, key);
+        } else {
+            const urls = await this.drawDataUrls(spec, TRAY_SIZES.map(([, size]) => size));
+            const image = nativeImage.createEmpty();
+            TRAY_SIZES.forEach(([scaleFactor], i) => image.addRepresentation({ scaleFactor, dataURL: urls[i] }));
+            result = image;
+        }
 
         if (this.cache.size > 256) { this.cache.clear(); }
-        this.cache.set(key, image);
-        return image;
+        this.cache.set(key, result);
+        return result;
+    }
+
+    private async renderIcoFile(spec: IconSpec, key: string): Promise<string> {
+        const file = path.join(this.icoDir, `${crypto.createHash('md5').update(key).digest('hex')}.ico`);
+        if (!fs.existsSync(file)) {
+            await this.init();
+            const script = `(${drawIcons.toString()})(${JSON.stringify(normalize(spec))}, ${JSON.stringify(ICO_SIZES)}, true)`;
+            const raw: string[] = await this.window.webContents.executeJavaScript(script, true);
+            const ico = buildIco(ICO_SIZES.map((size, i) => ({ size, rgba: Buffer.from(raw[i], 'base64') })));
+            await fs.promises.mkdir(this.icoDir, { recursive: true });
+            await fs.promises.writeFile(file, ico);
+        }
+        return file;
+    }
+
+    /** Remove cached .ico files from earlier runs (they are cheap to regenerate). */
+    clearIconCache(): void {
+        try { fs.rmSync(this.icoDir, { recursive: true, force: true }); } catch { /* ignore */ }
     }
 
     /** Single size data URL, used for previews in the settings window. */
@@ -88,7 +122,7 @@ function normalize(spec: IconSpec): IconSpec {
  * Runs inside the hidden renderer. Must be fully self-contained (no references to outer scope).
  * All shapes are drawn on whole pixels (no anti-aliasing) so they match the crisp shell icons in the tray.
  */
-function drawIcons(spec: IconSpec, sizes: number[]): string[] {
+function drawIcons(spec: IconSpec, sizes: number[], rawRgba = false): string[] {
     const fg = spec.lightTaskbar ? '#1b1b1b' : '#ffffff';
     const red = spec.lightTaskbar ? '#c42b1c' : '#ff5b5b';
     const green = spec.lightTaskbar ? '#0f7b0f' : '#6ccb5f';
@@ -237,6 +271,13 @@ function drawIcons(spec: IconSpec, sizes: number[]): string[] {
         } else {
             drawBattery(ctx, S);
         }
-        return canvas.toDataURL('image/png');
+        if (!rawRgba) { return canvas.toDataURL('image/png'); }
+        // Straight (non-premultiplied) RGBA as base64, for building .ico files in the main process.
+        const bytes = ctx.getImageData(0, 0, S, S).data;
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) {
+            binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
+        }
+        return btoa(binary);
     });
 }

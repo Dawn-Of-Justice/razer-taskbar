@@ -136,6 +136,7 @@ app.on('ready', async () => {
   settingsChanges.on('runAtStartup', value => app.setLoginItemSettings({ openAtLogin: value }));
   await loadSettings();
 
+  iconRenderer.clearIconCache(); // drawing code may have changed since the last run
   await iconRenderer.init();
   trayManager = new TrayManager(iconRenderer, [
     { label: 'Settings…', click: () => openSettingsWindow() },
