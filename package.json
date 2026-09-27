@@ -1,6 +1,6 @@
 {
   "name": "razer-taskbar",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "Windows tray icon showing the battery level of wireless Razer devices (headsets, mice, keyboards), read from Razer Synapse logs.",
   "main": ".webpack/main",
   "scripts": {
