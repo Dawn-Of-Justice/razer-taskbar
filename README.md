@@ -31,13 +31,16 @@ Razer Synapse already writes, so it needs no drivers or USB access and works wit
 
 ## Install
 
-Download or build the setup file (see below) and run it. The icon appears in the tray; open **Settings** to
+Download `razer-taskbar-<version>.Setup.exe` from the
+[latest release](https://github.com/Dawn-Of-Justice/razer-taskbar/releases/latest) and run it. The icon appears in the tray; open **Settings** to
 choose the icon style and turn on **Start with Windows**. If the icon is hidden behind the **^** arrow, drag it
 onto the taskbar.
 
 ## Build from source
 
 ```powershell
+git clone https://github.com/Dawn-Of-Justice/razer-taskbar.git
+cd razer-taskbar
 npm install
 npm start          # run in development mode
 npm run make       # build the installer
@@ -88,6 +91,7 @@ queries the device again (for example when its window is opened).
 | `EPERM: operation not permitted` during `npm install` | The project is in a synced folder (OneDrive) or another program has it open. Move it to a local folder such as `C:\dev` and install again. |
 | Icon shows "no device" | Check that Synapse is running and shows the device. **Settings → Synapse logs** opens the log folder. |
 | Number looks out of date | See the known limitation above. Opening Synapse makes it query the device. |
+| A blank "Electron" welcome window opens when you sign in | An older development build registered the bare `electron.exe` to start with Windows. Run `npm start` once (this version removes that entry), or disable "Electron" in Task Manager → Startup apps. |
 | No notifications | Use the installed app, not `npm start`, and check Focus Assist / Do Not Disturb. **Settings → Send test** checks delivery. |
 
 ## Project layout
@@ -113,6 +117,7 @@ test/                   Unit tests (node:test) with synthetic log lines
 
 ## Credits
 
+- Maintained by [Dawn-Of-Justice](https://github.com/Dawn-Of-Justice).
 - Original project by [sanraith](https://github.com/sanraith/razer-taskbar) (MIT).
 - Inspired by [Tekk-Know/RazerBatteryTaskbar](https://github.com/Tekk-Know/RazerBatteryTaskbar).
 

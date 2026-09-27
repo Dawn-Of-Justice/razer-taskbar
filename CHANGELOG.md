@@ -23,6 +23,7 @@
   low-battery alert.
 - A device reconnecting without its serial number no longer shows as disconnected.
 - "Last change" no longer resets when Synapse re-logs an unchanged state (for example when its window opens).
+- "Start with Windows" now starts the installed app through Squirrel's `Update.exe`, so it keeps working after updates. Development runs (`npm start`) no longer register the bare `electron.exe`, which opened Electron's welcome window at sign-in, and they remove such an entry if one exists.
 - Settings from older versions are kept when new settings are added, instead of being reset to defaults.
 - Logs are read incrementally (only new bytes) instead of re-reading the whole 5 MB file on every change.
 

@@ -1,4 +1,5 @@
 import os from 'os';
+import path from 'path';
 import { app, BrowserWindow, ipcMain, nativeTheme, shell } from 'electron';
 import { RazerWatcher } from './watcher/razer_watcher';
 import { SynapseV4LogDir } from './watcher/synapse4_files';
@@ -16,7 +17,7 @@ import type { AppInfo, IconPreviewRequest } from '../shared/types';
 declare const MAIN_WINDOW_WEBPACK_ENTRY: string;
 declare const MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
 
-const GITHUB_URL = 'https://github.com/sanraith/razer-taskbar';
+const GITHUB_URL = 'https://github.com/Dawn-Of-Justice/razer-taskbar';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -135,7 +136,7 @@ app.on('ready', async () => {
 
   let isFirstTimeLaunch = false;
   settingsChanges.on('_defaultSettingsCreated', () => isFirstTimeLaunch = true);
-  settingsChanges.on('runAtStartup', value => app.setLoginItemSettings({ openAtLogin: value }));
+  settingsChanges.on('runAtStartup', value => applyRunAtStartup(value));
   await loadSettings();
 
   iconRenderer.clearIconCache(); // drawing code may have changed since the last run
@@ -172,6 +173,26 @@ app.on('ready', async () => {
 
   if (isFirstTimeLaunch) { openSettingsWindow(); }
 });
+
+/**
+ * Register/unregister the app to start at sign-in.
+ * - Installed (Squirrel): start through Update.exe so the entry keeps working after updates.
+ * - Development (`npm start`): never register. process.execPath is the bare electron.exe there, and starting it
+ *   at sign-in just shows Electron's default welcome window. Also removes such an entry left by older versions.
+ */
+function applyRunAtStartup(enabled: boolean): void {
+  if (process.platform !== 'win32') {
+    app.setLoginItemSettings({ openAtLogin: enabled });
+    return;
+  }
+  if (!app.isPackaged) {
+    app.setLoginItemSettings({ openAtLogin: false });
+    return;
+  }
+  const updateExe = path.resolve(path.dirname(process.execPath), '..', 'Update.exe');
+  const args = ['--processStart', `"${path.basename(process.execPath)}"`];
+  app.setLoginItemSettings({ openAtLogin: enabled, path: updateExe, args });
+}
 
 function quit() {
   stopThemeWatch?.();

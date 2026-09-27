@@ -15,7 +15,10 @@
   },
   "author": "sanraith",
   "license": "MIT",
-  "repository": "https://github.com/sanraith/razer-taskbar",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Dawn-Of-Justice/razer-taskbar.git"
+  },
   "devDependencies": {
     "@electron-forge/cli": "^7.4.0",
     "@electron-forge/maker-squirrel": "^7.4.0",
@@ -51,5 +54,9 @@
     "tray",
     "windows",
     "electron"
-  ]
+  ],
+  "homepage": "https://github.com/Dawn-Of-Justice/razer-taskbar#readme",
+  "bugs": {
+    "url": "https://github.com/Dawn-Of-Justice/razer-taskbar/issues"
+  }
 }
